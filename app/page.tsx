@@ -1,4 +1,5 @@
 import Image from "next/image";
+import RedirectCountdown from "@/components/RedirectCountdown";
 
 export default function Home() {
   return (
@@ -48,6 +49,8 @@ export default function Home() {
               For more information, visit FlexLab
             </a>
           </div>
+
+          <RedirectCountdown />
         </section>
       </main>
 
