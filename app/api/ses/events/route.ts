@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { processSesEventPayload } from "@/lib/ses-events";
-import {
-  confirmSnsSubscription,
-  type SnsEnvelope,
-  verifySnsEnvelope,
-} from "@/lib/sns";
+import { type SnsEnvelope, verifySnsEnvelope } from "@/lib/sns";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,13 +23,61 @@ export async function POST(request: NextRequest) {
     await verifySnsEnvelope(envelope);
 
     if (envelope.Type === "SubscriptionConfirmation") {
-      await confirmSnsSubscription(envelope);
-      console.info("[ses-sns] subscription confirmed", {
+      if (!envelope.SubscribeURL) {
+        return NextResponse.json(
+          { ok: false, message: "SNS SubscribeURL is missing." },
+          { status: 400 }
+        );
+      }
+    
+      const subscribeUrl = new URL(envelope.SubscribeURL);
+    
+      if (
+        subscribeUrl.protocol !== "https:" ||
+        !subscribeUrl.hostname.endsWith(".amazonaws.com")
+      ) {
+        return NextResponse.json(
+          { ok: false, message: "Invalid SNS SubscribeURL." },
+          { status: 400 }
+        );
+      }
+    
+      const response = await fetch(envelope.SubscribeURL, {
+        method: "GET",
+        cache: "no-store",
+      });
+    
+      const responseText = await response.text();
+    
+      console.info("[ses-sns] subscription confirmation response", {
         topicArn: envelope.TopicArn,
         messageId: envelope.MessageId,
+        status: response.status,
+        body: responseText.slice(0, 500),
       });
-      return NextResponse.json({ ok: true, status: "subscription_confirmed" });
+    
+      if (!response.ok) {
+        return NextResponse.json(
+          {
+            ok: false,
+            message: `SNS confirmation failed with HTTP ${response.status}.`,
+          },
+          { status: 502 }
+        );
+      }
+    
+      return NextResponse.json({
+        ok: true,
+        status: "subscription_confirmed",
+      });
     }
+
+    console.info("[ses-sns] incoming envelope", {
+      type: envelope.Type,
+      topicArn: envelope.TopicArn,
+      messageId: envelope.MessageId,
+      hasSubscribeUrl: Boolean(envelope.SubscribeURL),
+    });
 
     if (envelope.Type === "UnsubscribeConfirmation") {
       console.warn("[ses-sns] unsubscribe confirmation received", {
