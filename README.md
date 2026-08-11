@@ -55,7 +55,7 @@ Copy `.env.example` to `.env.local` for local testing or inject the values throu
 NEXT_PUBLIC_SITE_URL=https://flexlabconnect.com
 UNSUBSCRIBE_SECRET=<minimum-32-character-secret>
 
-AWS_REGION=us-east-2
+SES_REGION=us-east-2
 AWS_ACCESS_KEY_ID=<server-side-iam-access-key>
 AWS_SECRET_ACCESS_KEY=<server-side-iam-secret>
 

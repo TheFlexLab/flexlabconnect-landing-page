@@ -28,7 +28,7 @@ function amzDates(now = new Date()) {
 }
 
 async function dynamoRequest<T>(target: string, body: unknown): Promise<T> {
-  const region = process.env.AWS_REGION?.trim() || "us-east-2";
+  const region = process.env.SES_REGION?.trim() || "us-east-2";
   const accessKey = requiredEnv("AWS_ACCESS_KEY_ID");
   const secretKey = requiredEnv("AWS_SECRET_ACCESS_KEY");
   const sessionToken = process.env.AWS_SESSION_TOKEN?.trim();
