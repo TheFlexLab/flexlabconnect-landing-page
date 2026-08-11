@@ -120,21 +120,27 @@ export async function processSesEventPayload(payload: unknown): Promise<Processe
   const recipients = recipientsForEvent(record, eventType);
   const suppressed: string[] = [];
 
+  console.info("[ses-sns] SES event received", {
+    eventType,
+    messageId: eventMessageId(record),
+    recipients,
+  });
+  
   if (eventType === "complaint") {
-    for (const email of recipients) {
-      await markEmailRiskEvent(email, "complaint");
-      suppressed.push(email);
-    }
+    suppressed.push(...recipients);
+  
+    console.warn("[ses-sns] complaint received", {
+      recipients,
+    });
   }
-
+  
   if (eventType === "bounce" && isPermanentBounce(record)) {
-    for (const email of recipients) {
-      await markEmailRiskEvent(email, "bounce");
-      suppressed.push(email);
-    }
+    suppressed.push(...recipients);
+  
+    console.warn("[ses-sns] permanent bounce received", {
+      recipients,
+    });
   }
-
-  await auditEvent(record, eventType, recipients);
 
   return {
     eventType,
