@@ -6,7 +6,7 @@ type DynamoAttribute =
   | { BOOL: boolean }
   | { NULL: boolean };
 
-type DynamoItem = Record<string, DynamoAttribute>;
+export type DynamoItem = Record<string, DynamoAttribute>;
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
