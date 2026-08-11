@@ -1,163 +1,197 @@
-import crypto from "crypto";
+import {
+  AttributeValue,
+  CreateTableCommand,
+  DescribeTableCommand,
+  DynamoDBClient,
+  GetItemCommand,
+  PutItemCommand,
+} from "@aws-sdk/client-dynamodb";
 
-type DynamoAttribute =
-  | { S: string }
-  | { N: string }
-  | { BOOL: boolean }
-  | { NULL: boolean };
+export type DynamoItem = Record<string, AttributeValue>;
 
-export type DynamoItem = Record<string, DynamoAttribute>;
-
-function requiredEnv(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) throw new Error(`${name} is not configured.`);
-  return value;
+function getRegion(): string {
+  return process.env.SES_REGION?.trim() || "us-east-2";
 }
 
-function hmac(key: Buffer | string, value: string): Buffer {
-  return crypto.createHmac("sha256", key).update(value, "utf8").digest();
-}
-
-function sha256(value: string): string {
-  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
-}
-
-function amzDates(now = new Date()) {
-  const iso = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
-  return { amzDate: iso, dateStamp: iso.slice(0, 8) };
-}
-
-async function dynamoRequest<T>(target: string, body: unknown): Promise<T> {
-  const region = process.env.SES_REGION?.trim() || "us-east-2";
-  const accessKey = requiredEnv("AWS_ACCESS_KEY_ID");
-  const secretKey = requiredEnv("AWS_SECRET_ACCESS_KEY");
-  const sessionToken = process.env.AWS_SESSION_TOKEN?.trim();
-  const host = `dynamodb.${region}.amazonaws.com`;
-  const endpoint = `https://${host}/`;
-  const payload = JSON.stringify(body);
-  const { amzDate, dateStamp } = amzDates();
-
-  const headers: Record<string, string> = {
-    "content-type": "application/x-amz-json-1.0",
-    "x-amz-date": amzDate,
-    "x-amz-target": `DynamoDB_20120810.${target}`,
-  };
-  if (sessionToken) headers["x-amz-security-token"] = sessionToken;
-
-  // `host` must be part of the SigV4 canonical request. The HTTP client adds
-  // the actual Host header automatically, so we sign it without forcing a
-  // forbidden/implementation-specific Host header through fetch().
-  const signingHeaders: Record<string, string> = { ...headers, host };
-  const signedHeaderNames = Object.keys(signingHeaders).sort();
-  const canonicalHeaders = signedHeaderNames
-    .map((name) => `${name}:${signingHeaders[name].trim()}\n`)
-    .join("");
-  const signedHeaders = signedHeaderNames.join(";");
-  const canonicalRequest = [
-    "POST",
-    "/",
-    "",
-    canonicalHeaders,
-    signedHeaders,
-    sha256(payload),
-  ].join("\n");
-
-  const service = "dynamodb";
-  const scope = `${dateStamp}/${region}/${service}/aws4_request`;
-  const stringToSign = [
-    "AWS4-HMAC-SHA256",
-    amzDate,
-    scope,
-    sha256(canonicalRequest),
-  ].join("\n");
-
-  const kDate = hmac(`AWS4${secretKey}`, dateStamp);
-  const kRegion = hmac(kDate, region);
-  const kService = hmac(kRegion, service);
-  const kSigning = hmac(kService, "aws4_request");
-  const signature = crypto
-    .createHmac("sha256", kSigning)
-    .update(stringToSign, "utf8")
-    .digest("hex");
-
-  headers.authorization = `AWS4-HMAC-SHA256 Credential=${accessKey}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    body: payload,
-    cache: "no-store",
+function getDynamoClient(): DynamoDBClient {
+  return new DynamoDBClient({
+    region: getRegion(),
   });
-
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!response.ok) {
-    const message = data?.message || data?.Message || text || response.statusText;
-    throw new Error(`DynamoDB ${target} failed: ${message}`);
-  }
-  return data as T;
 }
 
+/**
+ * DynamoDB table used for:
+ * - recipient eligibility
+ * - unsubscribe state
+ * - bounce state
+ * - complaint state
+ * - SES event audit records
+ */
 export function getEmailTableName(): string {
-  return process.env.DYNAMODB_EMAIL_TABLE?.trim() || "flexlabconnect-email-policy";
+  return (
+    process.env.DYNAMODB_EMAIL_TABLE?.trim() ||
+    "flexlabconnect-email-policy"
+  );
 }
 
+/**
+ * Confirms that the email policy table exists.
+ *
+ * If DYNAMODB_AUTO_CREATE=true is configured, the application can
+ * automatically create the table if it does not exist.
+ *
+ * For production, it is generally better to create the table once
+ * through AWS/IaC and leave DYNAMODB_AUTO_CREATE disabled.
+ */
 export async function ensureEmailPolicyTable(): Promise<void> {
+  const client = getDynamoClient();
   const tableName = getEmailTableName();
+
   try {
-    await dynamoRequest("DescribeTable", { TableName: tableName });
+    await client.send(
+      new DescribeTableCommand({
+        TableName: tableName,
+      })
+    );
+
     return;
   } catch (error) {
-    if (process.env.DYNAMODB_AUTO_CREATE !== "true") throw error;
-  }
-
-  await dynamoRequest("CreateTable", {
-    TableName: tableName,
-    BillingMode: "PAY_PER_REQUEST",
-    AttributeDefinitions: [{ AttributeName: "pk", AttributeType: "S" }],
-    KeySchema: [{ AttributeName: "pk", KeyType: "HASH" }],
-  });
-
-  const started = Date.now();
-  while (Date.now() - started < 60_000) {
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    try {
-      const result = await dynamoRequest<{ Table?: { TableStatus?: string } }>(
-        "DescribeTable",
-        { TableName: tableName }
-      );
-      if (result.Table?.TableStatus === "ACTIVE") return;
-    } catch {
-      // Retry while table is being created.
+    if (process.env.DYNAMODB_AUTO_CREATE !== "true") {
+      throw error;
     }
   }
-  throw new Error(`DynamoDB table ${tableName} did not become ACTIVE in time.`);
+
+  try {
+    await client.send(
+      new CreateTableCommand({
+        TableName: tableName,
+
+        BillingMode: "PAY_PER_REQUEST",
+
+        AttributeDefinitions: [
+          {
+            AttributeName: "pk",
+            AttributeType: "S",
+          },
+        ],
+
+        KeySchema: [
+          {
+            AttributeName: "pk",
+            KeyType: "HASH",
+          },
+        ],
+      })
+    );
+  } catch (error) {
+    /**
+     * Multiple requests could theoretically attempt to create the
+     * table simultaneously.
+     *
+     * If another invocation already created it, the polling below
+     * will detect the table normally.
+     */
+    console.warn("[dynamodb] CreateTable attempt returned an error", {
+      tableName,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  const startedAt = Date.now();
+  const timeoutMs = 60_000;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    try {
+      const result = await client.send(
+        new DescribeTableCommand({
+          TableName: tableName,
+        })
+      );
+
+      if (result.Table?.TableStatus === "ACTIVE") {
+        return;
+      }
+    } catch {
+      // Table may still be propagating. Retry until timeout.
+    }
+  }
+
+  throw new Error(
+    `DynamoDB table ${tableName} did not become ACTIVE within 60 seconds.`
+  );
 }
 
+/**
+ * Reads a single DynamoDB item using its primary key.
+ */
 export async function getItem(pk: string): Promise<DynamoItem | null> {
   await ensureEmailPolicyTable();
-  const result = await dynamoRequest<{ Item?: DynamoItem }>("GetItem", {
-    TableName: getEmailTableName(),
-    Key: { pk: { S: pk } },
-    ConsistentRead: true,
-  });
-  return result.Item || null;
+
+  const client = getDynamoClient();
+
+  const result = await client.send(
+    new GetItemCommand({
+      TableName: getEmailTableName(),
+
+      Key: {
+        pk: {
+          S: pk,
+        },
+      },
+
+      ConsistentRead: true,
+    })
+  );
+
+  return (result.Item as DynamoItem | undefined) || null;
 }
 
+/**
+ * Writes/replaces an item in the email-policy DynamoDB table.
+ */
 export async function putItem(item: DynamoItem): Promise<void> {
   await ensureEmailPolicyTable();
-  await dynamoRequest("PutItem", {
-    TableName: getEmailTableName(),
-    Item: item,
-  });
+
+  const client = getDynamoClient();
+
+  await client.send(
+    new PutItemCommand({
+      TableName: getEmailTableName(),
+      Item: item,
+    })
+  );
 }
 
-export function attrString(item: DynamoItem | null, key: string): string | null {
+/**
+ * Safely extracts a string attribute from a DynamoDB item.
+ */
+export function attrString(
+  item: DynamoItem | null,
+  key: string
+): string | null {
   const value = item?.[key];
-  return value && "S" in value ? value.S : null;
+
+  if (!value || !("S" in value)) {
+    return null;
+  }
+
+  return value.S || null;
 }
 
-export function attrBool(item: DynamoItem | null, key: string): boolean {
+/**
+ * Safely extracts a boolean attribute from a DynamoDB item.
+ */
+export function attrBool(
+  item: DynamoItem | null,
+  key: string
+): boolean {
   const value = item?.[key];
-  return Boolean(value && "BOOL" in value && value.BOOL);
+
+  if (!value || !("BOOL" in value)) {
+    return false;
+  }
+
+  return Boolean(value.BOOL);
 }
