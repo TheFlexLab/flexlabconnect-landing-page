@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "FlexLab Connect",
-  description: "Official outreach and communication domain of FlexLab",
+  description: "Official email communication domain of FlexLab",
 };
 
 export default function RootLayout({

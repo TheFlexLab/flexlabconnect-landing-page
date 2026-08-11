@@ -1,4 +1,5 @@
 import Image from "next/image";
+import Link from "next/link";
 
 const FLEXLAB_URL = "https://flexlab.io";
 const CONTACT_URL = "https://flexlab.io/contact";
@@ -112,9 +113,10 @@ export default function Home() {
             <p className="mt-3 text-sm leading-6 text-muted sm:text-base">
               FlexLab does not use purchased, rented, scraped, or third-party
               mailing lists for emails sent through this domain. Every optional
-              email includes a one-click unsubscribe link, and any bounce,
-              complaint, or unsubscribe is automatically suppressed from all
-              future delivery.
+              email includes a clear unsubscribe mechanism. Unsubscribe requests
+              are recorded immediately and blocked from future optional email
+              delivery. We also maintain recipient-quality controls for bounce
+              and complaint events.
             </p>
 
             <p className="mt-3 text-sm leading-6 text-muted sm:text-base">
@@ -172,12 +174,12 @@ export default function Home() {
               Terms of Service
             </a>
 
-            <a
-              href={`mailto:${SUPPORT_EMAIL}?subject=Unsubscribe%20Request`}
+            <Link
+              href={`/unsubscribe`}
               className="text-muted underline underline-offset-4 hover:text-foreground"
             >
               Unsubscribe Request
-            </a>
+            </Link>
 
             <a
               href={`mailto:${SUPPORT_EMAIL}`}
