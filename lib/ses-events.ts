@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { putItem } from "@/lib/dynamodb";
+import { getEventsCollection } from "@/lib/mongodb";
 import { markEmailRiskEvent } from "@/lib/email-policy";
 import { isValidEmail, normalizeEmail } from "@/lib/unsubscribe-token";
 
@@ -55,8 +55,7 @@ function recipientsForEvent(payload: UnknownRecord, eventType: string): string[]
   if (eventType === "delivery") return emailList(arrayValue(delivery, "recipients"));
   if (eventType === "deliverydelay") return emailList(arrayValue(delay, "delayedRecipients"));
 
-  const destination = arrayValue(mail, "destination");
-  return emailList(destination);
+  return emailList(arrayValue(mail, "destination"));
 }
 
 function normalizeEventType(payload: UnknownRecord): string {
@@ -71,8 +70,6 @@ function normalizeEventType(payload: UnknownRecord): string {
 function isPermanentBounce(payload: UnknownRecord): boolean {
   const bounce = asRecord(payload.bounce);
   const bounceType = stringValue(bounce, "bounceType");
-  // Configuration-set "Hard bounces" events are permanent. Some payloads do
-  // not include bounceType, so absence is treated as a hard bounce event.
   return !bounceType || bounceType.toLowerCase() === "permanent";
 }
 
@@ -89,16 +86,23 @@ async function auditEvent(
   const messageId = eventMessageId(payload);
   const canonical = JSON.stringify({ eventType, messageId, recipients: [...recipients].sort() });
   const hash = crypto.createHash("sha256").update(canonical).digest("hex").slice(0, 40);
-  const now = new Date().toISOString();
+  const eventKey = `SES_EVENT#${hash}`;
+  const events = await getEventsCollection();
 
-  await putItem({
-    pk: { S: `SES_EVENT#${hash}` },
-    type: { S: `ses_${eventType}` },
-    messageId: { S: messageId },
-    recipients: { S: recipients.join(",") },
-    createdAt: { S: now },
-    source: { S: "amazon_ses_sns" },
-  });
+  await events.updateOne(
+    { eventKey },
+    {
+      $setOnInsert: {
+        eventKey,
+        type: `ses_${eventType}`,
+        messageId,
+        recipients,
+        createdAt: new Date(),
+        source: "amazon_ses_sns",
+      },
+    },
+    { upsert: true }
+  );
 }
 
 export type ProcessedSesEvent = {
@@ -109,8 +113,8 @@ export type ProcessedSesEvent = {
 };
 
 /**
- * Handles both SES identity-level SNS notifications (notificationType) and
- * configuration-set SNS event publishing payloads (eventType).
+ * Handles SES configuration-set SNS event publishing payloads. It also remains
+ * compatible with identity-level feedback payloads if they are enabled later.
  */
 export async function processSesEventPayload(payload: unknown): Promise<ProcessedSesEvent> {
   const record = asRecord(payload);
@@ -125,22 +129,24 @@ export async function processSesEventPayload(payload: unknown): Promise<Processe
     messageId: eventMessageId(record),
     recipients,
   });
-  
+
   if (eventType === "complaint") {
-    suppressed.push(...recipients);
-  
-    console.warn("[ses-sns] complaint received", {
-      recipients,
-    });
+    for (const email of recipients) {
+      await markEmailRiskEvent(email, "complaint");
+      suppressed.push(email);
+    }
+    console.warn("[ses-sns] complaint persisted", { recipients });
   }
-  
+
   if (eventType === "bounce" && isPermanentBounce(record)) {
-    suppressed.push(...recipients);
-  
-    console.warn("[ses-sns] permanent bounce received", {
-      recipients,
-    });
+    for (const email of recipients) {
+      await markEmailRiskEvent(email, "bounce");
+      suppressed.push(email);
+    }
+    console.warn("[ses-sns] permanent bounce persisted", { recipients });
   }
+
+  await auditEvent(record, eventType, recipients);
 
   return {
     eventType,

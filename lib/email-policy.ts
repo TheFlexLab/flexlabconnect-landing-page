@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { attrBool, attrString, getItem, putItem } from "@/lib/dynamodb";
+import { getEventsCollection, getRecipientsCollection } from "@/lib/mongodb";
 import { isValidEmail, normalizeEmail } from "@/lib/unsubscribe-token";
 
 export const ALLOWED_RECIPIENT_SOURCES = [
@@ -10,6 +10,21 @@ export const ALLOWED_RECIPIENT_SOURCES = [
 ] as const;
 
 export type AllowedRecipientSource = (typeof ALLOWED_RECIPIENT_SOURCES)[number];
+
+export type RecipientRecord = {
+  email: string;
+  source: string;
+  sourceDetail?: string;
+  consentAt?: Date;
+  unsubscribed: boolean;
+  unsubscribedAt?: Date;
+  bounced: boolean;
+  bouncedAt?: Date;
+  complained: boolean;
+  complainedAt?: Date;
+  createdAt: Date;
+  updatedAt: Date;
+};
 
 export type EligibilityResult = {
   email: string;
@@ -25,10 +40,6 @@ export type EligibilityResult = {
   source?: string;
 };
 
-function recipientPk(email: string) {
-  return `RECIPIENT#${normalizeEmail(email)}`;
-}
-
 export async function registerEligibleRecipient(
   email: string,
   source: AllowedRecipientSource,
@@ -40,26 +51,29 @@ export async function registerEligibleRecipient(
     throw new Error("Recipient source is not allowed for SES delivery.");
   }
 
-  const pk = recipientPk(normalized);
-  const existing = await getItem(pk);
-  const now = new Date().toISOString();
+  const recipients = await getRecipientsCollection<RecipientRecord>();
+  const existing = await recipients.findOne({ email: normalized });
+  const now = new Date();
 
-  // Never silently clear an unsubscribe/bounce/complaint. A new form submission
-  // should not bypass an existing suppression record. Re-subscription should be
-  // an explicit, separately audited action if you add it later.
-  await putItem({
-    ...(existing || {}),
-    pk: { S: pk },
-    email: { S: normalized },
-    source: { S: source },
-    sourceDetail: { S: metadata?.sourceDetail || source },
-    consentAt: { S: (metadata?.consentAt || new Date()).toISOString() },
-    unsubscribed: { BOOL: attrBool(existing, "unsubscribed") },
-    bounced: { BOOL: attrBool(existing, "bounced") },
-    complained: { BOOL: attrBool(existing, "complained") },
-    createdAt: existing?.createdAt || { S: now },
-    updatedAt: { S: now },
-  });
+  await recipients.updateOne(
+    { email: normalized },
+    {
+      $set: {
+        email: normalized,
+        source,
+        sourceDetail: metadata?.sourceDetail || source,
+        consentAt: metadata?.consentAt || now,
+        unsubscribed: existing?.unsubscribed ?? false,
+        bounced: existing?.bounced ?? false,
+        complained: existing?.complained ?? false,
+        updatedAt: now,
+      },
+      $setOnInsert: {
+        createdAt: now,
+      },
+    },
+    { upsert: true }
+  );
 }
 
 export async function getEmailEligibility(email: string): Promise<EligibilityResult> {
@@ -68,22 +82,23 @@ export async function getEmailEligibility(email: string): Promise<EligibilityRes
     return { email: normalized, allowed: false, reason: "invalid_email" };
   }
 
-  const item = await getItem(recipientPk(normalized));
+  const recipients = await getRecipientsCollection<RecipientRecord>();
+  const item = await recipients.findOne({ email: normalized });
   if (!item) {
     return { email: normalized, allowed: false, reason: "unknown_recipient" };
   }
 
-  const source = attrString(item, "source") || "unknown";
+  const source = item.source || "unknown";
   if (!ALLOWED_RECIPIENT_SOURCES.includes(source as AllowedRecipientSource)) {
     return { email: normalized, allowed: false, reason: "disallowed_source", source };
   }
-  if (attrBool(item, "complained")) {
+  if (item.complained) {
     return { email: normalized, allowed: false, reason: "complained", source };
   }
-  if (attrBool(item, "bounced")) {
+  if (item.bounced) {
     return { email: normalized, allowed: false, reason: "bounced", source };
   }
-  if (attrBool(item, "unsubscribed")) {
+  if (item.unsubscribed) {
     return { email: normalized, allowed: false, reason: "unsubscribed", source };
   }
 
@@ -97,35 +112,45 @@ export async function assertEmailCanBeSent(email: string): Promise<void> {
   }
 }
 
-export async function unsubscribeEmail(email: string): Promise<"unsubscribed" | "already_unsubscribed"> {
+export async function unsubscribeEmail(
+  email: string
+): Promise<"unsubscribed" | "already_unsubscribed"> {
   const normalized = normalizeEmail(email);
-  const pk = recipientPk(normalized);
-  const existing = await getItem(pk);
-  const now = new Date().toISOString();
+  const recipients = await getRecipientsCollection<RecipientRecord>();
+  const events = await getEventsCollection();
+  const existing = await recipients.findOne({ email: normalized });
+  const now = new Date();
 
-  if (existing && attrBool(existing, "unsubscribed")) {
+  if (existing?.unsubscribed) {
     return "already_unsubscribed";
   }
 
-  // A valid signed token is sufficient proof that the address was included in an email
-  // generated by this application. Preserve known recipient metadata when available.
-  await putItem({
-    ...(existing || {}),
-    pk: { S: pk },
-    email: { S: normalized },
-    source: existing?.source || { S: "confirmed_subscriber" },
-    unsubscribed: { BOOL: true },
-    unsubscribedAt: { S: now },
-    updatedAt: { S: now },
-    createdAt: existing?.createdAt || { S: now },
-  });
+  await recipients.updateOne(
+    { email: normalized },
+    {
+      $set: {
+        email: normalized,
+        source: existing?.source || "confirmed_subscriber",
+        unsubscribed: true,
+        unsubscribedAt: now,
+        bounced: existing?.bounced ?? false,
+        complained: existing?.complained ?? false,
+        updatedAt: now,
+      },
+      $setOnInsert: {
+        createdAt: now,
+      },
+    },
+    { upsert: true }
+  );
 
-  await putItem({
-    pk: { S: `EVENT#${crypto.randomUUID()}` },
-    type: { S: "unsubscribe" },
-    email: { S: normalized },
-    createdAt: { S: now },
-    source: { S: "flexlabconnect.com" },
+  const eventKey = `UNSUBSCRIBE#${crypto.randomUUID()}`;
+  await events.insertOne({
+    eventKey,
+    type: "unsubscribe",
+    email: normalized,
+    createdAt: now,
+    source: "flexlabconnect.com",
   });
 
   return "unsubscribed";
@@ -136,18 +161,33 @@ export async function markEmailRiskEvent(
   event: "bounce" | "complaint"
 ): Promise<void> {
   const normalized = normalizeEmail(email);
-  const pk = recipientPk(normalized);
-  const existing = await getItem(pk);
-  const now = new Date().toISOString();
+  const recipients = await getRecipientsCollection<RecipientRecord>();
+  const existing = await recipients.findOne({ email: normalized });
+  const now = new Date();
 
-  await putItem({
-    ...(existing || {}),
-    pk: { S: pk },
-    email: { S: normalized },
-    source: existing?.source || { S: "existing_customer" },
-    bounced: { BOOL: event === "bounce" || attrBool(existing, "bounced") },
-    complained: { BOOL: event === "complaint" || attrBool(existing, "complained") },
-    updatedAt: { S: now },
-    createdAt: existing?.createdAt || { S: now },
-  });
+  const updates: Partial<RecipientRecord> = {
+    email: normalized,
+    source: existing?.source || "existing_customer",
+    unsubscribed: existing?.unsubscribed ?? false,
+    bounced: existing?.bounced ?? false,
+    complained: existing?.complained ?? false,
+    updatedAt: now,
+  };
+
+  if (event === "bounce") {
+    updates.bounced = true;
+    updates.bouncedAt = now;
+  } else {
+    updates.complained = true;
+    updates.complainedAt = now;
+  }
+
+  await recipients.updateOne(
+    { email: normalized },
+    {
+      $set: updates,
+      $setOnInsert: { createdAt: now },
+    },
+    { upsert: true }
+  );
 }
