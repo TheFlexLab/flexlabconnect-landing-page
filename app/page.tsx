@@ -6,7 +6,7 @@ const CONTACT_URL = "https://flexlab.io/contact";
 const PRIVACY_URL = "https://flexlab.io/privacy-policy";
 const TERMS_URL = "https://flexlab.io/terms-and-conditions";
 
-const SUPPORT_EMAIL = "harry@flexlabconnect.com";
+const SUPPORT_EMAIL = "contact@flexlabconnect.com";
 
 export default function Home() {
   return (
@@ -111,6 +111,10 @@ export default function Home() {
               mailing lists for emails sent through this domain. Email
               addresses are collected through direct business interactions
               with FlexLab.
+            </p>
+
+            <p className="mt-3 text-sm leading-6 text-muted sm:text-base">
+            This domain is not used for cold outreach, newsletters, bulk marketing, or unsolicited email campaigns.
             </p>
 
             <p className="mt-3 text-sm leading-6 text-muted sm:text-base">
