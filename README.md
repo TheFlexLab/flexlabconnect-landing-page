@@ -138,3 +138,24 @@ The app automatically creates the collections/indexes on first use:
 - `email_events`: unsubscribe and SES audit events
 
 Permanent bounce and complaint events update `email_recipients`; delivery/send/etc. are retained as audit events.
+
+## Internal SES Test Sender
+
+Protected route: `/admin/ses-test`
+
+Configure these environment variables before using it:
+
+- `ADMIN_USERNAME`
+- `ADMIN_PASSWORD`
+- `ADMIN_AUTH_SECRET` (32+ random characters)
+- `SES_REGION` (defaults to `us-east-2`)
+- `SES_FROM_NAME` (defaults to `FlexLab`)
+- `SES_FROM_EMAIL` (defaults to `contact@flexlabconnect.com`)
+- `SES_REPLY_TO` (defaults to the From email)
+- `SES_ACCESS_KEY_ID`
+- `SES_SECRET_ACCESS_KEY`
+- `SES_SESSION_TOKEN` only if temporary credentials are used
+
+The SES credentials must be server-side environment variables and should belong to an IAM identity restricted to the minimum SES sending permissions needed. Do not expose them through `NEXT_PUBLIC_*` variables.
+
+While the SES account is in sandbox, test recipients must be verified in the same SES region.
